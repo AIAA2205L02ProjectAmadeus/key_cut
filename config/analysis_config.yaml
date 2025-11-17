@@ -1,0 +1,4 @@
+# analysis_config.yaml
+chord_window: 0.5
+quantize: 0.125
+rhythm_top_k: 5

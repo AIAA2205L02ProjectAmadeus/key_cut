@@ -1,0 +1,12 @@
+# mapping_rules.yaml
+# pattern: role
+'.*vocal.*|.*voice.*': vocals
+'.*melody.*|.*lead.*': melody
+'.*bass.*': bass
+'.*drum.*|.*percussion.*': drums
+'.*chord.*|.*pad.*': harmony
+'piano|grand': piano
+'guitar': guitar
+'bass': bass
+'violin|cello|strings': strings
+'flute|sax|clarinet': winds
