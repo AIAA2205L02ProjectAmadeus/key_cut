@@ -1,9 +1,14 @@
 """midi_processing.midi_parser
 
-提供基本的 MIDI 解析功能：
-- 支持多轨（SMF）MIDI
-- 处理 tempo 变化并将 ticks 转换为秒
-- 提取 note_on/note_off 事件并输出带有 start/end 的事件列表
+Provides basic MIDI parsing functionality for Standard MIDI Files (SMF).
+
+Features:
+- Multi-track MIDI file support
+- Tempo change handling with accurate tick-to-seconds conversion
+- Note event extraction (note_on/note_off) with start/end timestamps
+
+This module handles the low-level parsing of MIDI files, converting raw MIDI
+messages into a structured list of note events with timing information in seconds.
 """
 from typing import List, Dict, Any, Tuple
 import mido
@@ -13,7 +18,21 @@ from .exceptions import MIDIParsingError
 
 
 def _build_tempo_map(mid: mido.MidiFile) -> List[Tuple[int, int]]:
-    """扫描所有 track，返回排序的 (absolute_tick, tempo) 列表。默认 tempo 500000 (120bpm)。"""
+    """Build a tempo map by scanning all tracks for tempo changes.
+
+    Args:
+        mid: A mido.MidiFile object containing MIDI tracks.
+
+    Returns:
+        A sorted list of (absolute_tick, tempo) tuples. The tempo is in microseconds
+        per quarter note. Default tempo is 500000 (120 BPM).
+
+    Example:
+        >>> mid = mido.MidiFile('song.mid')
+        >>> tempo_map = _build_tempo_map(mid)
+        >>> tempo_map
+        [(0, 500000), (1920, 428571)]  # Tempo change at tick 1920
+    """
     tempo_map = [(0, 500000)]
     try:
         for i, track in enumerate(mid.tracks):
@@ -43,7 +62,25 @@ def _build_tempo_map(mid: mido.MidiFile) -> List[Tuple[int, int]]:
 
 
 def _ticks_to_seconds(ticks: int, tempo_map: List[Tuple[int, int]], ticks_per_beat: int) -> float:
-    """将绝对 ticks 转换为秒。处理分段 tempo。"""
+    """Convert absolute MIDI ticks to seconds, handling tempo changes.
+
+    This function accounts for tempo changes throughout the MIDI file by using
+    a tempo map. It calculates the cumulative time by processing each tempo
+    segment separately.
+
+    Args:
+        ticks: Absolute tick value to convert.
+        tempo_map: List of (tick, tempo) tuples from _build_tempo_map.
+        ticks_per_beat: MIDI file's ticks per quarter note resolution.
+
+    Returns:
+        Time in seconds (float) corresponding to the given tick position.
+
+    Example:
+        >>> tempo_map = [(0, 500000), (1920, 428571)]
+        >>> _ticks_to_seconds(960, tempo_map, 480)
+        1.0  # 960 ticks = 2 beats at 120 BPM = 1 second
+    """
     if ticks <= 0:
         return 0.0
     seconds = 0.0
@@ -67,63 +104,35 @@ def _ticks_to_seconds(ticks: int, tempo_map: List[Tuple[int, int]], ticks_per_be
 
 
 def parse_midi(path: str) -> List[Dict[str, Any]]:
-    """解析 MIDI 文件，返回音符事件列表：
-    每个事件为 dict: {note, velocity, start, end, channel, track, program}
-    时间单位为秒（浮点）。
+    """Parse a MIDI file and return a list of note events.
 
-    Raises:
-        MIDIParsingError: If the file path is invalid, file is corrupted,
-                         or file has no tracks/notes.
+    This is the main entry point for parsing MIDI files. It extracts all note
+    events from all tracks, converts timing information to seconds, and returns
+    a structured list of note events sorted by start time.
+
+    Args:
+        path: File path to the MIDI file to parse.
+
+    Returns:
+        A list of note event dictionaries, each containing:
+        - note (int): MIDI note number (0-127)
+        - velocity (int): Note velocity (1-127)
+        - start (float): Note start time in seconds
+        - end (float): Note end time in seconds
+        - channel (int): MIDI channel (0-15)
+        - track (int): Track index in the MIDI file
+        - track_name (str or None): Name of the track (if available)
+        - program (int): MIDI program/instrument number (-1 if not set)
+
+    Example:
+        >>> events = parse_midi('song.mid')
+        >>> events[0]
+        {'note': 60, 'velocity': 80, 'start': 0.0, 'end': 0.5,
+         'channel': 0, 'track': 1, 'track_name': 'Piano', 'program': 0}
+        >>> print(f"First note: {events[0]['note']} at {events[0]['start']}s")
+        First note: 60 at 0.0s
     """
-    # Validate file path
-    if not path:
-        raise MIDIParsingError(
-            "MIDI file path cannot be empty. Please provide a valid file path.",
-            file_path=path
-        )
-
-    if not os.path.exists(path):
-        raise MIDIParsingError(
-            f"MIDI file not found. Please check the file path and ensure the file exists.",
-            file_path=path
-        )
-
-    if not os.path.isfile(path):
-        raise MIDIParsingError(
-            f"Path is not a file. Please provide a path to a MIDI file.",
-            file_path=path
-        )
-
-    # Try to load and parse the MIDI file
-    try:
-        mid = mido.MidiFile(path)
-    except (IOError, OSError) as e:
-        raise MIDIParsingError(
-            "Failed to read MIDI file. The file may be inaccessible or corrupted.",
-            file_path=path,
-            original_error=e
-        )
-    except Exception as e:
-        raise MIDIParsingError(
-            "Failed to parse MIDI file. The file may be corrupted or in an unsupported format.",
-            file_path=path,
-            original_error=e
-        )
-
-    # Validate MIDI file has tracks
-    if not hasattr(mid, 'tracks') or not mid.tracks:
-        raise MIDIParsingError(
-            "MIDI file contains no tracks. Please provide a valid MIDI file with at least one track.",
-            file_path=path
-        )
-
-    # Validate ticks_per_beat
-    if not hasattr(mid, 'ticks_per_beat') or mid.ticks_per_beat <= 0:
-        raise MIDIParsingError(
-            "Invalid MIDI file format: missing or invalid ticks_per_beat value.",
-            file_path=path
-        )
-
+    mid = mido.MidiFile(path)
     ticks_per_beat = mid.ticks_per_beat
 
     # Build tempo map with error handling
@@ -202,68 +211,74 @@ def parse_midi(path: str) -> List[Dict[str, Any]]:
 
 
 class AdvancedMIDIParser:
-    """面向用户的高级解析器封装，提供类式 API。"""
+    """Advanced MIDI parser providing a class-based API.
+
+    This class wraps the parse_midi function and provides additional utilities
+    for track detection and event filtering. Use this class when you need
+    object-oriented interface or track metadata extraction.
+
+    Example:
+        >>> parser = AdvancedMIDIParser()
+        >>> events = parser.parse_midi_file('song.mid')
+        >>> tracks = parser.detect_tracks('song.mid')
+        >>> for track in tracks:
+        ...     print(f"Track {track['track_id']}: {track['track_name']}")
+    """
     def __init__(self):
+        """Initialize the AdvancedMIDIParser."""
         pass
 
     def parse_midi_file(self, file_path: str) -> List[Dict[str, Any]]:
-        """解析文件并返回 note event 列表（与 parse_midi 相同的格式）。
+        """Parse a MIDI file and return note events.
 
-        Raises:
-            MIDIParsingError: If the file cannot be parsed.
+        Args:
+            file_path: Path to the MIDI file.
+
+        Returns:
+            List of note event dictionaries (same format as parse_midi).
+
+        Example:
+            >>> parser = AdvancedMIDIParser()
+            >>> events = parser.parse_midi_file('example.mid')
+            >>> len(events)
+            1523
         """
         return parse_midi(file_path)
 
     def extract_note_events(self, midi_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """从 parse_midi 的输出中过滤并返回 note 事件（按 start 排序）。"""
+        """Filter and return only note events from parsed MIDI events.
+
+        Args:
+            midi_events: List of MIDI events from parse_midi.
+
+        Returns:
+            Filtered list of note events, sorted by start time.
+
+        Note:
+            This method is primarily for compatibility. The parse_midi function
+            already returns only note events.
+        """
         return sorted([e for e in midi_events if 'note' in e], key=lambda x: x['start'])
 
     def detect_tracks(self, file_path: str) -> List[Dict[str, Any]]:
-        """检测并返回每个 track 的元信息（id, name, programs）。
+        """Detect and return metadata for each track in a MIDI file.
 
-        Raises:
-            MIDIParsingError: If the file cannot be read or parsed.
+        Args:
+            file_path: Path to the MIDI file.
+
+        Returns:
+            List of track metadata dictionaries, each containing:
+            - track_id (int): Zero-based track index
+            - track_name (str or None): Track name from track_name meta message
+            - programs (list): Sorted list of program numbers used in the track
+
+        Example:
+            >>> parser = AdvancedMIDIParser()
+            >>> tracks = parser.detect_tracks('song.mid')
+            >>> tracks[1]
+            {'track_id': 1, 'track_name': 'Piano', 'programs': [0, 1]}
         """
-        # Validate file path
-        if not file_path:
-            raise MIDIParsingError(
-                "MIDI file path cannot be empty. Please provide a valid file path.",
-                file_path=file_path
-            )
-
-        if not os.path.exists(file_path):
-            raise MIDIParsingError(
-                f"MIDI file not found. Please check the file path and ensure the file exists.",
-                file_path=file_path
-            )
-
-        if not os.path.isfile(file_path):
-            raise MIDIParsingError(
-                f"Path is not a file. Please provide a path to a MIDI file.",
-                file_path=file_path
-            )
-
-        try:
-            mid = mido.MidiFile(file_path)
-        except (IOError, OSError) as e:
-            raise MIDIParsingError(
-                "Failed to read MIDI file. The file may be inaccessible or corrupted.",
-                file_path=file_path,
-                original_error=e
-            )
-        except Exception as e:
-            raise MIDIParsingError(
-                "Failed to parse MIDI file. The file may be corrupted or in an unsupported format.",
-                file_path=file_path,
-                original_error=e
-            )
-
-        if not hasattr(mid, 'tracks') or not mid.tracks:
-            raise MIDIParsingError(
-                "MIDI file contains no tracks. Please provide a valid MIDI file with at least one track.",
-                file_path=file_path
-            )
-
+        mid = mido.MidiFile(file_path)
         tracks = []
         try:
             for ti, track in enumerate(mid.tracks):

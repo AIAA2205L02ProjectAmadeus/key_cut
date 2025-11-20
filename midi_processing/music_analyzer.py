@@ -1,10 +1,15 @@
 """midi_processing.music_analyzer
 
-提供乐理分析功能：
-- 调性检测（基于音高类分布与 Krumhansl 轮廓）
-- 简单和弦识别（窗口化）
-- 节奏模式识别（IOI 直方图）
-- 音符对齐/量化工具
+Provides music theory analysis functionality for MIDI note events.
+
+Features:
+- Key detection using Krumhansl-Schmuckler key-finding algorithm
+- Simple chord recognition using window-based pitch class analysis
+- Rhythm pattern identification via inter-onset interval (IOI) histograms
+- Note alignment and quantization utilities
+
+This module implements various music theory algorithms to extract high-level
+musical information from low-level MIDI note events.
 """
 from typing import List, Dict, Tuple, Optional
 import math
@@ -159,40 +164,37 @@ def _pitch_class_distribution(events: List[Dict]) -> List[float]:
     return pc
 
 
-def detect_key(events: List[Dict]) -> Optional[str]:
-    """基于音高类持续时间分布识别调性，返回诸如 'C major' 或 'A minor'。
+def detect_key(events: List[Dict]) -> str:
+    """Detect the musical key of a piece using the Krumhansl-Schmuckler algorithm.
+
+    This function analyzes the distribution of pitch classes weighted by note
+    duration and correlates them with Krumhansl's major and minor key profiles
+    for all 24 possible keys. The key with the highest correlation is returned.
 
     Args:
-        events: List of note events with 'note', 'start', and 'end' fields.
+        events: List of note event dictionaries containing 'note', 'start',
+            and 'end' fields.
 
     Returns:
-        Key signature string (e.g., 'C major', 'A minor') or None if key cannot be detected.
+        String representing the detected key (e.g., 'C major', 'A minor').
+        Returns 'Unknown' if the key cannot be determined.
 
-    Raises:
-        InvalidInputError: If events list is empty or contains invalid data.
+    Example:
+        >>> events = parse_midi('song_in_c_major.mid')
+        >>> key = detect_key(events)
+        >>> print(key)
+        'C major'
+
+        >>> events = parse_midi('song_in_a_minor.mid')
+        >>> detect_key(events)
+        'A minor'
+
+    Note:
+        The algorithm works best with longer musical phrases containing
+        clear tonal content. Short fragments or atonal music may produce
+        ambiguous results.
     """
-    # Validate input
-    if not events:
-        raise InvalidInputError(
-            "Cannot detect key from empty events list. Please provide at least one note event.",
-            parameter_name="events",
-            expected="Non-empty list of note events",
-            received="Empty list"
-        )
-
-    if not isinstance(events, list):
-        raise InvalidInputError(
-            "Events must be a list.",
-            parameter_name="events",
-            expected="List of note events",
-            received=f"{type(events).__name__}"
-        )
-
-    try:
-        pc = _pitch_class_distribution(events)
-    except InvalidInputError:
-        raise  # Re-raise validation errors from _pitch_class_distribution
-
+    pc = _pitch_class_distribution(events)
     best = None
     best_score = -1e9
     # 尝试所有 12 个移位，分别对 major/minor 轮廓做点积
@@ -217,7 +219,7 @@ def detect_key(events: List[Dict]) -> Optional[str]:
     return f"{NOTE_NAMES[best[0]]} {best[1]}"
 
 
-def analyze_chords(events: List[Dict], window: Optional[float] = None) -> List[Dict]:
+def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
     """简单窗口化和弦识别：每个窗口收集音高类，尝试匹配三和弦。
     返回 [{time, root, type, notes}]。
 
@@ -323,61 +325,38 @@ def analyze_chords(events: List[Dict], window: Optional[float] = None) -> List[D
 
 
 def rhythm_pattern(events: List[Dict], top_k: int = 5) -> List[Tuple[float, int]]:
-    """基于 onset 的 IOI（inter-onset interval）直方图，返回 top_k 常见间隔（秒）与其计数。
+    """Analyze rhythm patterns using inter-onset interval (IOI) histogram.
+
+    This function extracts the time intervals between consecutive note onsets
+    and returns the most common intervals, which represent the dominant
+    rhythmic patterns in the piece.
 
     Args:
-        events: List of note events with 'start' field.
-        top_k: Number of top patterns to return.
+        events: List of note event dictionaries containing 'start' field.
+        top_k: Number of most common intervals to return. Default is 5.
 
     Returns:
-        List of (interval, count) tuples for the most common rhythmic intervals.
+        List of (interval, count) tuples, sorted by frequency (descending).
+        Interval is in seconds (float), count is the number of occurrences.
 
-    Raises:
-        InvalidInputError: If events list is None or contains invalid data.
+    Example:
+        >>> events = parse_midi('rhythmic_piece.mid')
+        >>> patterns = rhythm_pattern(events, top_k=5)
+        >>> for interval, count in patterns:
+        ...     print(f"Interval: {interval}s, Count: {count}")
+        Interval: 0.5s, Count: 234
+        Interval: 0.25s, Count: 156
+        Interval: 1.0s, Count: 89
+        Interval: 0.75s, Count: 45
+        Interval: 0.125s, Count: 23
+
+    Note:
+        At 120 BPM (quarter note = 0.5s):
+        - 0.5s = quarter note
+        - 0.25s = eighth note
+        - 0.125s = sixteenth note
     """
-    # Validate input
-    if events is None:
-        raise InvalidInputError(
-            "Events cannot be None. Please provide a list of note events (can be empty).",
-            parameter_name="events",
-            expected="List of note events",
-            received="None"
-        )
-
-    if not isinstance(events, list):
-        raise InvalidInputError(
-            "Events must be a list.",
-            parameter_name="events",
-            expected="List of note events",
-            received=f"{type(events).__name__}"
-        )
-
-    if top_k <= 0:
-        raise InvalidInputError(
-            "top_k must be a positive integer.",
-            parameter_name="top_k",
-            expected="Positive integer",
-            received=f"{top_k}"
-        )
-
-    # Validate event data and extract onsets
-    for i, ev in enumerate(events):
-        if 'start' not in ev:
-            raise InvalidInputError(
-                f"Event at index {i} is missing required 'start' field.",
-                parameter_name="events",
-                expected="Events with 'start' field"
-            )
-
-    try:
-        onsets = sorted({ev['start'] for ev in events})
-    except (TypeError, KeyError) as e:
-        raise InvalidInputError(
-            "Invalid event data: 'start' field must be a numeric value.",
-            parameter_name="events",
-            expected="Events with numeric 'start' values"
-        )
-
+    onsets = sorted({ev['start'] for ev in events})
     if len(onsets) < 2:
         return []
 
@@ -388,7 +367,7 @@ def rhythm_pattern(events: List[Dict], top_k: int = 5) -> List[Tuple[float, int]
     return c.most_common(top_k)
 
 
-def align_notes(events: List[Dict], quantize: Optional[float] = None) -> List[Dict]:
+def align_notes(events: List[Dict], quantize: float = 0.125) -> List[Dict]:
     """量化 start/end 到最近的 quantize（秒），并合并非常短的片段。
     返回新的 events 列表（拷贝）。
 
