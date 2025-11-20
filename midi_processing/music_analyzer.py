@@ -1,10 +1,15 @@
 """midi_processing.music_analyzer
 
-提供乐理分析功能：
-- 调性检测（基于音高类分布与 Krumhansl 轮廓）
-- 简单和弦识别（窗口化）
-- 节奏模式识别（IOI 直方图）
-- 音符对齐/量化工具
+Provides music theory analysis functionality for MIDI note events.
+
+Features:
+- Key detection using Krumhansl-Schmuckler key-finding algorithm
+- Simple chord recognition using window-based pitch class analysis
+- Rhythm pattern identification via inter-onset interval (IOI) histograms
+- Note alignment and quantization utilities
+
+This module implements various music theory algorithms to extract high-level
+musical information from low-level MIDI note events.
 """
 from typing import List, Dict, Tuple
 import math
@@ -29,7 +34,35 @@ def _pitch_class_distribution(events: List[Dict]) -> List[float]:
 
 
 def detect_key(events: List[Dict]) -> str:
-    """基于音高类持续时间分布识别调性，返回诸如 'C major' 或 'A minor'。"""
+    """Detect the musical key of a piece using the Krumhansl-Schmuckler algorithm.
+
+    This function analyzes the distribution of pitch classes weighted by note
+    duration and correlates them with Krumhansl's major and minor key profiles
+    for all 24 possible keys. The key with the highest correlation is returned.
+
+    Args:
+        events: List of note event dictionaries containing 'note', 'start',
+            and 'end' fields.
+
+    Returns:
+        String representing the detected key (e.g., 'C major', 'A minor').
+        Returns 'Unknown' if the key cannot be determined.
+
+    Example:
+        >>> events = parse_midi('song_in_c_major.mid')
+        >>> key = detect_key(events)
+        >>> print(key)
+        'C major'
+
+        >>> events = parse_midi('song_in_a_minor.mid')
+        >>> detect_key(events)
+        'A minor'
+
+    Note:
+        The algorithm works best with longer musical phrases containing
+        clear tonal content. Short fragments or atonal music may produce
+        ambiguous results.
+    """
     pc = _pitch_class_distribution(events)
     best = None
     best_score = -1e9
@@ -53,8 +86,39 @@ def detect_key(events: List[Dict]) -> str:
 
 
 def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
-    """简单窗口化和弦识别：每个窗口收集音高类，尝试匹配三和弦。
-    返回 [{time, root, type, notes}]。"""
+    """Identify chords using window-based pitch class analysis.
+
+    This function divides the musical timeline into windows and analyzes
+    the pitch classes present in each window. It attempts to identify
+    triads (major, minor, diminished) by checking for characteristic
+    interval patterns.
+
+    Args:
+        events: List of note event dictionaries containing 'note' and 'start'.
+        window: Time window size in seconds for grouping simultaneous notes.
+            Default is 0.5 seconds.
+
+    Returns:
+        List of chord dictionaries, each containing:
+        - time (float): Start time of the chord in seconds
+        - root (str or None): Root note name (e.g., 'C', 'F#') or None
+        - type (str): Chord type ('major', 'minor', 'diminished', 'cluster')
+        - notes (list): List of pitch classes (0-11) present in the chord
+
+    Example:
+        >>> events = parse_midi('chord_progression.mid')
+        >>> chords = analyze_chords(events, window=0.5)
+        >>> for chord in chords[:3]:
+        ...     print(f"{chord['time']:.2f}s: {chord['root']} {chord['type']}")
+        0.00s: C major
+        2.00s: F major
+        4.00s: G major
+
+    Note:
+        - Adjust the window parameter based on tempo and musical style
+        - Larger windows work better for slow music
+        - Unrecognized pitch combinations are labeled as 'cluster'
+    """
     if not events:
         return []
     # 收集所有 onset times
@@ -90,7 +154,37 @@ def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
 
 
 def rhythm_pattern(events: List[Dict], top_k: int = 5) -> List[Tuple[float, int]]:
-    """基于 onset 的 IOI（inter-onset interval）直方图，返回 top_k 常见间隔（秒）与其计数。"""
+    """Analyze rhythm patterns using inter-onset interval (IOI) histogram.
+
+    This function extracts the time intervals between consecutive note onsets
+    and returns the most common intervals, which represent the dominant
+    rhythmic patterns in the piece.
+
+    Args:
+        events: List of note event dictionaries containing 'start' field.
+        top_k: Number of most common intervals to return. Default is 5.
+
+    Returns:
+        List of (interval, count) tuples, sorted by frequency (descending).
+        Interval is in seconds (float), count is the number of occurrences.
+
+    Example:
+        >>> events = parse_midi('rhythmic_piece.mid')
+        >>> patterns = rhythm_pattern(events, top_k=5)
+        >>> for interval, count in patterns:
+        ...     print(f"Interval: {interval}s, Count: {count}")
+        Interval: 0.5s, Count: 234
+        Interval: 0.25s, Count: 156
+        Interval: 1.0s, Count: 89
+        Interval: 0.75s, Count: 45
+        Interval: 0.125s, Count: 23
+
+    Note:
+        At 120 BPM (quarter note = 0.5s):
+        - 0.5s = quarter note
+        - 0.25s = eighth note
+        - 0.125s = sixteenth note
+    """
     onsets = sorted({ev['start'] for ev in events})
     if len(onsets) < 2:
         return []
@@ -102,8 +196,42 @@ def rhythm_pattern(events: List[Dict], top_k: int = 5) -> List[Tuple[float, int]
 
 
 def align_notes(events: List[Dict], quantize: float = 0.125) -> List[Dict]:
-    """量化 start/end 到最近的 quantize（秒），并合并非常短的片段。
-    返回新的 events 列表（拷贝）。"""
+    """Quantize note timings to a rhythmic grid and merge overlapping notes.
+
+    This function snaps note start and end times to the nearest quantization
+    grid point and merges notes that overlap after quantization. This is
+    useful for cleaning up timing imperfections or preparing data for
+    analysis that assumes quantized rhythms.
+
+    Args:
+        events: List of note event dictionaries containing 'note', 'velocity',
+            'start', 'end', and 'channel' fields.
+        quantize: Grid spacing in seconds. Default is 0.125 (32nd note at 120 BPM).
+            Common values:
+            - 0.5 = quarter note at 120 BPM
+            - 0.25 = eighth note at 120 BPM
+            - 0.125 = sixteenth note at 120 BPM
+            - 0.0625 = thirty-second note at 120 BPM
+
+    Returns:
+        New list of quantized event dictionaries (original events are not modified).
+        Overlapping notes with the same pitch and channel are merged.
+
+    Example:
+        >>> events = parse_midi('slightly_off_timing.mid')
+        >>> # Original timing
+        >>> events[0]
+        {'note': 60, 'start': 0.023, 'end': 0.487, ...}
+
+        >>> # Quantized to 16th note grid
+        >>> aligned = align_notes(events, quantize=0.125)
+        >>> aligned[0]
+        {'note': 60, 'start': 0.0, 'end': 0.5, ...}
+
+    Note:
+        - Very short notes (duration < quantize) are extended to minimum duration
+        - Merging preserves the maximum velocity among merged notes
+    """
     out = []
     for ev in events:
         s = round(ev['start'] / quantize) * quantize

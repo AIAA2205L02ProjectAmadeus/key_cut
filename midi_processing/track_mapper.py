@@ -1,6 +1,11 @@
 """midi_processing.track_mapper
 
-实现基于轨道名称的自动映射，支持可配置的正则规则与默认策略。
+Implements automatic track mapping based on track names and instrument programs.
+
+This module provides flexible track-to-role mapping using configurable regex
+patterns. It supports both manual mapping rules and YAML configuration files.
+Track names or MIDI program numbers can be used to categorize tracks into
+musical roles (e.g., piano, bass, drums, melody).
 """
 from typing import List, Dict, Tuple, Optional
 import re
@@ -16,13 +21,31 @@ DEFAULT_RULES: List[Tuple[str, str]] = [
 
 
 def map_tracks(track_names: List[str], rules: Optional[List[Tuple[str, str]]] = None) -> Dict[str, str]:
-    """根据轨道名称返回映射：{原名: mapped_role}
+    """Map track names to musical roles using regex pattern matching.
 
-    参数:
-      - track_names: 轨道名称列表
-      - rules: 可选的 (pattern, target) 列表（按顺序匹配）
+    This function applies a list of regex patterns to track names and assigns
+    roles based on the first matching pattern. If no pattern matches, the track
+    is assigned the role 'unknown'.
 
-    默认行为：按规则匹配，未匹配则使用 'unknown'
+    Args:
+        track_names: List of track name strings to map.
+        rules: Optional list of (pattern, target_role) tuples. Patterns are
+            matched in order. If None, DEFAULT_RULES are used.
+
+    Returns:
+        Dictionary mapping each track name to its assigned role.
+        Format: {track_name: role}
+
+    Example:
+        >>> track_names = ['Grand Piano', 'Electric Bass', 'Drums']
+        >>> mapping = map_tracks(track_names)
+        >>> mapping
+        {'Grand Piano': 'piano', 'Electric Bass': 'bass', 'Drums': 'drums'}
+
+        >>> custom_rules = [(r'synth', 'synthesizer'), (r'vocal', 'voice')]
+        >>> mapping = map_tracks(['Synth Lead'], rules=custom_rules)
+        >>> mapping
+        {'Synth Lead': 'synthesizer'}
     """
     rules = rules or DEFAULT_RULES
     compiled = [(re.compile(pat, re.IGNORECASE), target) for pat, target in rules]
@@ -38,9 +61,29 @@ def map_tracks(track_names: List[str], rules: Optional[List[Tuple[str, str]]] = 
 
 
 def map_tracks_from_parser_events(events: List[Dict]) -> Dict[int, str]:
-    """辅助函数：从解析器事件中基于 track id 提取名字并映射。
-    解析器当前只提供 track id，若没有名字则使用 'track_{id}'。
-    返回 {track_id: role}
+    """Map track IDs to roles based on MIDI program numbers.
+
+    This is a fallback strategy when track names are unavailable. It infers
+    musical roles from MIDI program numbers using General MIDI conventions:
+    - Programs 0-7: Piano
+    - Programs 24-31: Guitar
+    - Programs 32-39: Bass
+    - Programs 40-47: Strings
+    - Programs 112-119: Drums
+
+    Args:
+        events: List of note event dictionaries from parse_midi, containing
+            'track' and 'program' fields.
+
+    Returns:
+        Dictionary mapping track ID to inferred role.
+        Format: {track_id: role}
+
+    Example:
+        >>> events = parse_midi('song.mid')
+        >>> track_roles = map_tracks_from_parser_events(events)
+        >>> track_roles
+        {0: 'unknown', 1: 'piano', 2: 'bass', 3: 'drums'}
     """
     # 这里我们没有 track 名称信息，因此返回 default roles per program if available
     # 作为后备策略：如果存在 program 字段，按 program 范围推测（简化）
@@ -67,7 +110,28 @@ def map_tracks_from_parser_events(events: List[Dict]) -> Dict[int, str]:
 
 
 class TrackMapper:
-    """类化音轨映射器，支持加载配置与自定义规则。"""
+    """Configurable track-to-role mapper supporting custom rules and YAML config.
+
+    This class provides a flexible interface for mapping track names or events
+    to musical roles. It supports initialization from custom rules, YAML
+    configuration files, or built-in defaults.
+
+    Attributes:
+        rules: List of (pattern, target_role) tuples used for matching.
+
+    Example:
+        >>> # Using default rules
+        >>> mapper = TrackMapper()
+        >>> mapping = mapper.auto_map_tracks(track_names=['Piano', 'Bass'])
+
+        >>> # Using YAML configuration
+        >>> mapper = TrackMapper(config_path='config/mapping_rules.yaml')
+        >>> mapping = mapper.auto_map_tracks(events=parsed_events)
+
+        >>> # Using custom rules
+        >>> custom = [(r'.*lead.*', 'melody'), (r'.*pad.*', 'harmony')]
+        >>> mapper = TrackMapper(rules=custom)
+    """
     MAPPING_RULES = {
         r'.*vocal.*|.*voice.*': 'vocals',
         r'.*melody.*|.*lead.*': 'melody',
@@ -77,6 +141,17 @@ class TrackMapper:
     }
 
     def __init__(self, rules: Optional[List[Tuple[str, str]]] = None, config_path: Optional[str] = None):
+        """Initialize the TrackMapper with optional custom rules or config file.
+
+        Args:
+            rules: Optional list of (regex_pattern, target_role) tuples. Takes
+                precedence over config_path and defaults.
+            config_path: Optional path to YAML configuration file containing
+                pattern-to-role mappings. Requires PyYAML to be installed.
+
+        Note:
+            Priority order: rules > config_path > MAPPING_RULES > DEFAULT_RULES
+        """
         # 优先使用传入的 rules（列表 of (pattern,target)），其次尝试从 config_path 或默认 MAPPING_RULES
         if rules is not None:
             self.rules = rules
@@ -97,7 +172,35 @@ class TrackMapper:
                 self.rules = [(k, v) for k, v in self.MAPPING_RULES.items()]
 
     def auto_map_tracks(self, track_names: Optional[List[str]] = None, events: Optional[List[Dict]] = None) -> Dict[str, str]:
-        """自动映射：可传入 track_names（优先）或 events（parse_midi 输出）。返回 {track_name: role} 或 {track_id: role}。
+        """Automatically map tracks to roles from track names or parsed events.
+
+        This method accepts either track names directly or events from parse_midi.
+        When events are provided, it extracts track names from the 'track_name'
+        field, falling back to 'track_{id}' format if names are unavailable.
+
+        Args:
+            track_names: Optional list of track name strings. Takes precedence
+                over events if both are provided.
+            events: Optional list of note event dictionaries from parse_midi,
+                containing 'track' and 'track_name' fields.
+
+        Returns:
+            Dictionary mapping track names to assigned roles.
+            Format: {track_name: role}
+
+        Raises:
+            ValueError: If both track_names and events are None.
+
+        Example:
+            >>> mapper = TrackMapper()
+            >>> # Map from track names
+            >>> mapping = mapper.auto_map_tracks(track_names=['Piano', 'Drums'])
+            >>> mapping
+            {'Piano': 'piano', 'Drums': 'drums'}
+
+            >>> # Map from parsed events
+            >>> events = parse_midi('song.mid')
+            >>> mapping = mapper.auto_map_tracks(events=events)
         """
         if track_names is None and events is not None:
             # 尝试从 events 提取 track_name -> use earliest non-null name per track id
@@ -125,5 +228,19 @@ class TrackMapper:
         return mapping
 
     def create_custom_mapping(self, user_rules: Dict[str, str]):
-        """用用户规则替换当前规则（user_rules: pattern->target）。"""
+        """Replace current mapping rules with user-provided rules.
+
+        Args:
+            user_rules: Dictionary of regex patterns to target roles.
+                Format: {regex_pattern: target_role}
+
+        Example:
+            >>> mapper = TrackMapper()
+            >>> custom_rules = {
+            ...     r'.*synth.*': 'synthesizer',
+            ...     r'.*vocal.*': 'voice',
+            ...     r'.*perc.*': 'percussion'
+            ... }
+            >>> mapper.create_custom_mapping(custom_rules)
+        """
         self.rules = [(k, v) for k, v in user_rules.items()]
