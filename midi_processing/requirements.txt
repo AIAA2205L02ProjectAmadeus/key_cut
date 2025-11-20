@@ -1,3 +1,4 @@
 mido>=1.2.10
 pytest>=6.0.0
 mypy>=1.0.0
+pyyaml>=5.0.0
