@@ -4,6 +4,8 @@
 """
 from typing import List, Dict, Tuple, Optional
 import re
+import os
+import yaml
 
 DEFAULT_RULES: List[Tuple[str, str]] = [
     (r'piano|grand', 'piano'),
@@ -77,24 +79,52 @@ class TrackMapper:
     }
 
     def __init__(self, rules: Optional[List[Tuple[str, str]]] = None, config_path: Optional[str] = None):
-        # 优先使用传入的 rules（列表 of (pattern,target)），其次尝试从 config_path 或默认 MAPPING_RULES
+        # 优先使用传入的 rules（列表 of (pattern,target)），其次尝试从 config_path 或默认配置文件
         if rules is not None:
             self.rules = rules
         else:
+            # 如果没有指定 config_path，尝试加载默认的 mapping_rules.yaml
+            if config_path is None:
+                default_config = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'mapping_rules.yaml')
+                if os.path.exists(default_config):
+                    config_path = default_config
+
+            # 尝试从配置文件加载
             if config_path:
-                try:
-                    import yaml
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        doc = yaml.safe_load(f)
-                        items = []
-                        for pat, tgt in (doc or {}).items():
-                            items.append((pat, tgt))
-                        self.rules = items if items else DEFAULT_RULES
-                except Exception:
-                    self.rules = DEFAULT_RULES
+                self.rules = self._load_rules_from_yaml(config_path)
             else:
-                # convert MAPPING_RULES dict to list
+                # 如果没有配置文件，使用类定义的 MAPPING_RULES
                 self.rules = [(k, v) for k, v in self.MAPPING_RULES.items()]
+
+    def _load_rules_from_yaml(self, config_path: str) -> List[Tuple[str, str]]:
+        """从 YAML 文件加载映射规则，失败时回退到 DEFAULT_RULES。
+
+        参数:
+          - config_path: YAML 配置文件路径
+
+        返回:
+          - 规则列表 [(pattern, target), ...]
+        """
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                doc = yaml.safe_load(f)
+                if not doc or not isinstance(doc, dict):
+                    # 文件为空或格式不正确，使用默认规则
+                    return DEFAULT_RULES
+
+                items = []
+                for pat, tgt in doc.items():
+                    if isinstance(pat, str) and isinstance(tgt, str):
+                        items.append((pat, tgt))
+
+                # 如果成功加载了至少一条规则，使用加载的规则；否则使用默认规则
+                return items if items else DEFAULT_RULES
+        except (FileNotFoundError, IOError, yaml.YAMLError) as e:
+            # 文件不存在、读取错误或 YAML 解析错误，回退到默认规则
+            return DEFAULT_RULES
+        except Exception as e:
+            # 其他未预期的错误，也回退到默认规则
+            return DEFAULT_RULES
 
     def auto_map_tracks(self, track_names: Optional[List[str]] = None, events: Optional[List[Dict]] = None) -> Dict[str, str]:
         """自动映射：可传入 track_names（优先）或 events（parse_midi 输出）。返回 {track_name: role} 或 {track_id: role}。
