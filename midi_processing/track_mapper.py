@@ -4,6 +4,7 @@
 """
 from typing import List, Dict, Tuple, Optional
 import re
+from .exceptions import ConfigurationError
 import os
 import yaml
 
@@ -91,7 +92,78 @@ class TrackMapper:
 
             # 尝试从配置文件加载
             if config_path:
-                self.rules = self._load_rules_from_yaml(config_path)
+                try:
+                    import yaml
+                    try:
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            doc = yaml.safe_load(f)
+                    except FileNotFoundError:
+                        raise ConfigurationError(
+                            f"Configuration file not found. Please ensure the file exists at the specified path.",
+                            config_path=config_path
+                        )
+                    except PermissionError as e:
+                        raise ConfigurationError(
+                            f"Permission denied when reading configuration file.",
+                            config_path=config_path,
+                            original_error=e
+                        )
+                    except yaml.YAMLError as e:
+                        raise ConfigurationError(
+                            f"Invalid YAML format in configuration file. Please check the file syntax.",
+                            config_path=config_path,
+                            original_error=e
+                        )
+                    except Exception as e:
+                        raise ConfigurationError(
+                            f"Failed to read configuration file.",
+                            config_path=config_path,
+                            original_error=e
+                        )
+
+                    # Validate loaded configuration
+                    if doc is None:
+                        raise ConfigurationError(
+                            f"Configuration file is empty or contains only null values.",
+                            config_path=config_path
+                        )
+
+                    if not isinstance(doc, dict):
+                        raise ConfigurationError(
+                            f"Configuration must be a YAML dictionary (key-value pairs), not {type(doc).__name__}.",
+                            config_path=config_path
+                        )
+
+                    items = []
+                    for pat, tgt in doc.items():
+                        if not isinstance(pat, str):
+                            raise ConfigurationError(
+                                f"Configuration pattern keys must be strings, found {type(pat).__name__}.",
+                                config_path=config_path
+                            )
+                        if not isinstance(tgt, str):
+                            raise ConfigurationError(
+                                f"Configuration target values must be strings, found {type(tgt).__name__} for pattern '{pat}'.",
+                                config_path=config_path
+                            )
+                        # Validate regex pattern
+                        try:
+                            re.compile(pat, re.IGNORECASE)
+                        except re.error as e:
+                            raise ConfigurationError(
+                                f"Invalid regex pattern '{pat}' in configuration.",
+                                config_path=config_path,
+                                original_error=e
+                            )
+                        items.append((pat, tgt))
+                    self.rules = items if items else DEFAULT_RULES
+                except ConfigurationError:
+                    raise  # Re-raise our custom configuration errors
+                except ImportError:
+                    raise ConfigurationError(
+                        "YAML library (pyyaml) is not installed. Please install it to use YAML configuration files: pip install pyyaml",
+                        config_path=config_path
+                    )
             else:
                 # 如果没有配置文件，使用类定义的 MAPPING_RULES
                 self.rules = [(k, v) for k, v in self.MAPPING_RULES.items()]
