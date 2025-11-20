@@ -11,12 +11,18 @@ Features:
 This module implements various music theory algorithms to extract high-level
 musical information from low-level MIDI note events.
 """
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Any, Optional
 import math
 import os
 import yaml
 from collections import Counter, defaultdict
-from .exceptions import InvalidInputError
+from .validators import (
+    validate_note_events_list,
+    validate_window_size,
+    validate_top_k,
+    validate_quantize_value,
+    ValidationError
+)
 
 # Krumhansl major/minor key profiles (normalized weights)
 KRUMHANSL_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
@@ -111,100 +117,53 @@ except Exception:
     pass
 
 
-def _pitch_class_distribution(events: List[Dict]) -> List[float]:
-    """Calculate pitch class distribution from events.
+def _pitch_class_distribution(events: List[Dict[str, Any]]) -> List[float]:
+    """Calculate pitch class distribution weighted by duration.
 
     Args:
-        events: List of note events with 'note', 'start', and 'end' fields.
+        events: List of note event dictionaries
 
     Returns:
-        List of 12 normalized probabilities for each pitch class.
-
-    Raises:
-        InvalidInputError: If events list is empty or contains invalid data.
+        List of 12 normalized weights for pitch classes C through B
     """
-    if not events:
-        raise InvalidInputError(
-            "Cannot calculate pitch class distribution from empty events list.",
-            parameter_name="events",
-            expected="Non-empty list of note events",
-            received="Empty list"
-        )
-
-    pc = [0.0] * 12
-    for i, ev in enumerate(events):
-        # Validate required fields
-        if 'note' not in ev:
-            raise InvalidInputError(
-                f"Event at index {i} is missing required 'note' field.",
-                parameter_name="events",
-                expected="Events with 'note', 'start', and 'end' fields"
-            )
-        if 'start' not in ev or 'end' not in ev:
-            raise InvalidInputError(
-                f"Event at index {i} is missing required 'start' or 'end' field.",
-                parameter_name="events",
-                expected="Events with 'note', 'start', and 'end' fields"
-            )
-
-        try:
-            dur = max(0.0, ev.get('end', 0.0) - ev.get('start', 0.0))
-            pc[ev['note'] % 12] += dur
-        except (TypeError, ValueError) as e:
-            raise InvalidInputError(
-                f"Invalid note data at index {i}: note, start, and end must be numeric values.",
-                parameter_name="events",
-                expected="Numeric values for note, start, and end",
-                received=f"note={ev.get('note')}, start={ev.get('start')}, end={ev.get('end')}"
-            )
-
-    s = sum(pc)
+    pc: List[float] = [0.0] * 12
+    for ev in events:
+        dur: float = max(0.0, ev.get('end', 0.0) - ev.get('start', 0.0))
+        pc[ev['note'] % 12] += dur
+    s: float = sum(pc)
     if s > 0:
         pc = [x / s for x in pc]
     return pc
 
 
-def detect_key(events: List[Dict]) -> str:
-    """Detect the musical key of a piece using the Krumhansl-Schmuckler algorithm.
-
-    This function analyzes the distribution of pitch classes weighted by note
-    duration and correlates them with Krumhansl's major and minor key profiles
-    for all 24 possible keys. The key with the highest correlation is returned.
+def detect_key(events: List[Dict[str, Any]]) -> str:
+    """基于音高类持续时间分布识别调性，返回诸如 'C major' 或 'A minor'。
 
     Args:
-        events: List of note event dictionaries containing 'note', 'start',
-            and 'end' fields.
+        events: List of note event dictionaries
 
     Returns:
-        String representing the detected key (e.g., 'C major', 'A minor').
-        Returns 'Unknown' if the key cannot be determined.
+        String describing detected key (e.g., 'C major', 'A minor')
 
-    Example:
-        >>> events = parse_midi('song_in_c_major.mid')
-        >>> key = detect_key(events)
-        >>> print(key)
-        'C major'
-
-        >>> events = parse_midi('song_in_a_minor.mid')
-        >>> detect_key(events)
-        'A minor'
-
-    Note:
-        The algorithm works best with longer musical phrases containing
-        clear tonal content. Short fragments or atonal music may produce
-        ambiguous results.
+    Raises:
+        ValidationError: If events list is invalid
     """
-    pc = _pitch_class_distribution(events)
-    best = None
-    best_score = -1e9
+    validate_note_events_list(events, strict=False)
+
+    if not events:
+        return 'Unknown'
+
+    pc: List[float] = _pitch_class_distribution(events)
+    best: Optional[Tuple[int, str]] = None
+    best_score: float = -1e9
     # 尝试所有 12 个移位，分别对 major/minor 轮廓做点积
     for root in range(12):
         # rotate profile
-        major_profile = KRUMHANSL_MAJOR[-root:] + KRUMHANSL_MAJOR[:-root]
-        minor_profile = KRUMHANSL_MINOR[-root:] + KRUMHANSL_MINOR[:-root]
+        major_profile: List[float] = KRUMHANSL_MAJOR[-root:] + KRUMHANSL_MAJOR[:-root]
+        minor_profile: List[float] = KRUMHANSL_MINOR[-root:] + KRUMHANSL_MINOR[:-root]
         # compute correlation (dot product)
-        maj_score = sum(a * b for a, b in zip(pc, major_profile))
-        min_score = sum(a * b for a, b in zip(pc, minor_profile))
+        maj_score: float = sum(a * b for a, b in zip(pc, major_profile))
+        min_score: float = sum(a * b for a, b in zip(pc, minor_profile))
         if maj_score > best_score:
             best_score = maj_score
             best = (root, 'major')
@@ -219,44 +178,22 @@ def detect_key(events: List[Dict]) -> str:
     return f"{NOTE_NAMES[best[0]]} {best[1]}"
 
 
-def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
+def analyze_chords(events: List[Dict[str, Any]], window: float = 0.5) -> List[Dict[str, Any]]:
     """简单窗口化和弦识别：每个窗口收集音高类，尝试匹配三和弦。
     返回 [{time, root, type, notes}]。
 
     Args:
-        events: List of note events with 'note' and 'start' fields.
-        window: Time window size in seconds for chord detection.
+        events: List of note event dictionaries
+        window: Time window in seconds for chord analysis
 
     Returns:
-        List of detected chords with time, root, type, and notes.
+        List of chord dictionaries with time, root, type, and notes
 
     Raises:
-        InvalidInputError: If events list is None or contains invalid data.
+        ValidationError: If inputs are invalid
     """
-    # Validate input
-    if events is None:
-        raise InvalidInputError(
-            "Events cannot be None. Please provide a list of note events (can be empty).",
-            parameter_name="events",
-            expected="List of note events",
-            received="None"
-        )
-
-    if not isinstance(events, list):
-        raise InvalidInputError(
-            "Events must be a list.",
-            parameter_name="events",
-            expected="List of note events",
-            received=f"{type(events).__name__}"
-        )
-
-    if window <= 0:
-        raise InvalidInputError(
-            "Window size must be positive.",
-            parameter_name="window",
-            expected="Positive number",
-            received=f"{window}"
-        )
+    validate_note_events_list(events, strict=False)
+    validate_window_size(window)
 
     if not events:
         return []
@@ -277,35 +214,19 @@ def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
             )
 
     # 收集所有 onset times
-    try:
-        onsets = sorted({ev['start'] for ev in events})
-    except (TypeError, KeyError) as e:
-        raise InvalidInputError(
-            "Invalid event data: 'start' field must be a numeric value.",
-            parameter_name="events",
-            expected="Events with numeric 'start' values"
-        )
-
-    chords = []
+    onsets: List[float] = sorted({ev['start'] for ev in events})
+    chords: List[Dict[str, Any]] = []
     for t in onsets:
         # window: [t, t+window)
-        try:
-            notes = [ev['note'] % 12 for ev in events if ev['start'] >= t and ev['start'] < t + window]
-        except (TypeError, KeyError) as e:
-            raise InvalidInputError(
-                "Invalid event data: 'note' field must be a numeric value.",
-                parameter_name="events",
-                expected="Events with numeric 'note' values"
-            )
-
+        notes: List[int] = [ev['note'] % 12 for ev in events if ev['start'] >= t and ev['start'] < t + window]
         if not notes:
             continue
-        pc = sorted(set(notes))
+        pc: List[int] = sorted(set(notes))
         # try all possible roots to classify triad
-        found = False
+        found: bool = False
         for root in pc:
             # compute intervals present
-            intervals = set(((n - root) % 12) for n in pc)
+            intervals: set[int] = set(((n - root) % 12) for n in pc)
             if {0, 4, 7}.issubset(intervals):
                 chords.append({'time': t, 'root': NOTE_NAMES[root], 'type': 'major', 'notes': pc})
                 found = True
@@ -324,128 +245,59 @@ def analyze_chords(events: List[Dict], window: float = 0.5) -> List[Dict]:
     return chords
 
 
-def rhythm_pattern(events: List[Dict], top_k: int = 5) -> List[Tuple[float, int]]:
-    """Analyze rhythm patterns using inter-onset interval (IOI) histogram.
-
-    This function extracts the time intervals between consecutive note onsets
-    and returns the most common intervals, which represent the dominant
-    rhythmic patterns in the piece.
+def rhythm_pattern(events: List[Dict[str, Any]], top_k: int = 5) -> List[Tuple[float, int]]:
+    """基于 onset 的 IOI（inter-onset interval）直方图，返回 top_k 常见间隔（秒）与其计数。
 
     Args:
-        events: List of note event dictionaries containing 'start' field.
-        top_k: Number of most common intervals to return. Default is 5.
+        events: List of note event dictionaries
+        top_k: Number of most common intervals to return
 
     Returns:
-        List of (interval, count) tuples, sorted by frequency (descending).
-        Interval is in seconds (float), count is the number of occurrences.
+        List of (interval_seconds, count) tuples
 
-    Example:
-        >>> events = parse_midi('rhythmic_piece.mid')
-        >>> patterns = rhythm_pattern(events, top_k=5)
-        >>> for interval, count in patterns:
-        ...     print(f"Interval: {interval}s, Count: {count}")
-        Interval: 0.5s, Count: 234
-        Interval: 0.25s, Count: 156
-        Interval: 1.0s, Count: 89
-        Interval: 0.75s, Count: 45
-        Interval: 0.125s, Count: 23
-
-    Note:
-        At 120 BPM (quarter note = 0.5s):
-        - 0.5s = quarter note
-        - 0.25s = eighth note
-        - 0.125s = sixteenth note
+    Raises:
+        ValidationError: If inputs are invalid
     """
-    onsets = sorted({ev['start'] for ev in events})
+    validate_note_events_list(events, strict=False)
+    validate_top_k(top_k)
+
+    onsets: List[float] = sorted({ev['start'] for ev in events})
     if len(onsets) < 2:
         return []
-
-    iois = []
+    iois: List[float] = []
     for i in range(1, len(onsets)):
         iois.append(round(onsets[i] - onsets[i-1], 6))
-    c = Counter(iois)
+    c: Counter[float] = Counter(iois)
     return c.most_common(top_k)
 
 
-def align_notes(events: List[Dict], quantize: float = 0.125) -> List[Dict]:
+def align_notes(events: List[Dict[str, Any]], quantize: float = 0.125) -> List[Dict[str, Any]]:
     """量化 start/end 到最近的 quantize（秒），并合并非常短的片段。
     返回新的 events 列表（拷贝）。
 
     Args:
-        events: List of note events with 'start', 'end', 'note', and 'channel' fields.
-        quantize: Quantization grid size in seconds (must be positive).
+        events: List of note event dictionaries
+        quantize: Quantization grid size in seconds
 
     Returns:
-        List of quantized and merged note events.
+        New list of quantized and merged note events
 
     Raises:
-        InvalidInputError: If events list is None or contains invalid data.
+        ValidationError: If inputs are invalid
     """
-    # Validate input
-    if events is None:
-        raise InvalidInputError(
-            "Events cannot be None. Please provide a list of note events (can be empty).",
-            parameter_name="events",
-            expected="List of note events",
-            received="None"
-        )
+    validate_note_events_list(events, strict=False)
+    validate_quantize_value(quantize)
 
-    if not isinstance(events, list):
-        raise InvalidInputError(
-            "Events must be a list.",
-            parameter_name="events",
-            expected="List of note events",
-            received=f"{type(events).__name__}"
-        )
-
-    if quantize <= 0:
-        raise InvalidInputError(
-            "Quantize value must be positive.",
-            parameter_name="quantize",
-            expected="Positive number",
-            received=f"{quantize}"
-        )
-
-    if not events:
-        return []
-
-    # Validate event data
-    for i, ev in enumerate(events):
-        required_fields = ['start', 'end', 'note', 'channel']
-        for field in required_fields:
-            if field not in ev:
-                raise InvalidInputError(
-                    f"Event at index {i} is missing required '{field}' field.",
-                    parameter_name="events",
-                    expected=f"Events with {', '.join(required_fields)} fields"
-                )
-
-    out = []
-    for i, ev in enumerate(events):
-        try:
-            s = round(ev['start'] / quantize) * quantize
-            e = round(ev['end'] / quantize) * quantize
-            if e <= s:
-                e = s + quantize  # 最小时值
-            out.append({**ev, 'start': s, 'end': e})
-        except (TypeError, ValueError) as e:
-            raise InvalidInputError(
-                f"Invalid numeric values in event at index {i}: start, end must be numbers.",
-                parameter_name="events",
-                expected="Numeric values for start and end",
-                received=f"start={ev.get('start')}, end={ev.get('end')}"
-            )
-
+    out: List[Dict[str, Any]] = []
+    for ev in events:
+        s: float = round(ev['start'] / quantize) * quantize
+        e: float = round(ev['end'] / quantize) * quantize
+        if e <= s:
+            e = s + quantize  # 最小时值
+        out.append({**ev, 'start': s, 'end': e})
     # 合并完全重叠且相同 note/channel 的事件
-    try:
-        out.sort(key=lambda x: (x['note'], x['channel'], x['start']))
-    except (TypeError, KeyError) as e:
-        raise InvalidInputError(
-            "Invalid event data: note and channel must be comparable values.",
-            parameter_name="events"
-        )
-
-    merged = []
+    out.sort(key=lambda x: (x['note'], x['channel'], x['start']))
+    merged: List[Dict[str, Any]] = []
     for ev in out:
         if merged and ev['note'] == merged[-1]['note'] and ev['channel'] == merged[-1]['channel'] and ev['start'] <= merged[-1]['end']:
             # extend
